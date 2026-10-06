@@ -1,0 +1,26 @@
+{
+  "name": "dsh-screenshot",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Repository metadata for the dsh-screenshot plugin. The installable DeepSeek Harness package lives in static/ (see static/package.json).",
+  "type": "module",
+  "license": "MIT",
+  "author": "cuteG41cute",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cuteG41cute/dsh-screenshot.git"
+  },
+  "homepage": "https://github.com/cuteG41cute/dsh-screenshot#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "screenshot",
+    "annotation",
+    "screen-capture"
+  ],
+  "scripts": {
+    "test": "node test/bundle-smoke.mjs"
+  }
+}

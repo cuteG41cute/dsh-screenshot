@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# local install backups (created by install.ps1)
+_backup/
+
+# logs and scratch
+*.log
+.tmp/
+tmp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
