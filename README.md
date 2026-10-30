@@ -186,9 +186,23 @@ dsh-screenshot/
 ├── test/
 │   ├── bundle-smoke.mjs      # 离线自检（10 项，无需浏览器）
 │   └── browser-compat.mjs    # 真实 Chromium 捕获链路（7 项，Windows 兼容基线）
+├── tools/
+│   └── upgrade-installed.ps1 # 把已安装的包同步到仓库版本（备份 + sha256 + 校验模式）
 ├── install.ps1
 ├── uninstall.ps1
 └── README.md
 ```
+
+## 升级已安装的包（Windows）
+
+不用重装整个插件，直接同步 `static/` 到已安装目录（会先备份）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\upgrade-installed.ps1          # 复制
+# 重启 harness
+powershell -ExecutionPolicy Bypass -File tools\upgrade-installed.ps1 -Verify  # 校验 sha256
+```
+
+`-Verify` 只比对磁盘文件；运行态请在页面控制台看 `window.__dshScreenshot.version`。
 
 MIT License.
