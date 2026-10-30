@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
-    const VERSION = '1.2.1';
+    const VERSION = '1.3.1';
     const STYLE_TAG_ID = 'dsh-screenshot/styles';
     const BTN_CLASS = 'dsh-screenshot-btn';
     const PLUGIN_ID = 'dsh-screenshot';
@@ -108,6 +108,94 @@ window.__ModuleLoader__.load({
         el.style.opacity = '0';
         setTimeout(() => el.remove(), 300);
       }, isError === true ? 4200 : 1800);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * native capture bridge (desktop shell)
+     *
+     * WebKitGTK's getDisplayMedia cannot negotiate kwin's variable-framerate
+     * screencast stream (GStreamer "range start is not smaller than end"), so
+     * the Linux shell provides one-shot PNG capture over the same message
+     * channel preview-tools uses:
+     *
+     *   page  → shell : {type:'dsh-screenshot', id}
+     *   shell → page : window.__dshShotReply(id, {ok, dataUrl, error})
+     *
+     * Two names on purpose: `__dshShot` is the registry object, `__dshShotReply`
+     * is the function the host calls.  Using one name for both makes the host
+     * call an object and the reply dies silently (that was the original bug).
+     * ------------------------------------------------------------------ */
+
+    const NATIVE_CAPTURE_TIMEOUT_MS = 30000;
+
+    /** True when a desktop shell exposes the message bridge. */
+    function nativeBridge() {
+      if (typeof window === 'undefined' || !window.chrome || !window.chrome.webview) return null;
+      const view = window.chrome.webview;
+      return typeof view.postMessage === 'function' ? view : null;
+    }
+
+    function canvasFromDataUrl(dataUrl) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          if (!canvas.width || !canvas.height) return resolve(null);
+          canvas.getContext('2d').drawImage(img, 0, 0);
+          resolve(canvas);
+        };
+        img.onerror = () => resolve(null);
+        img.src = dataUrl;
+      });
+    }
+
+    /**
+     * Ask the desktop shell for a full-screen PNG.
+     * @returns {canvas} on success, {error: string} when the bridge exists but
+     *          failed, or null when there is no desktop shell (plain browser).
+     */
+    function nativeCapture() {
+      const bridge = nativeBridge();
+      if (bridge === null) return Promise.resolve(null);
+      return new Promise((resolve) => {
+        const id = 'shot-' + Date.now().toString(36) + '-'
+          + Math.random().toString(36).slice(2, 8);
+        let settled = false;
+        const registry = (window.__dshShot = window.__dshShot || {});
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { delete registry[id]; } catch (error) { registry[id] = undefined; }
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish({ error: '原生截屏超时' }),
+          NATIVE_CAPTURE_TIMEOUT_MS);
+        registry[id] = async (reply) => {
+          if (!reply || reply.ok !== true || !reply.dataUrl) {
+            return finish({ error: (reply && reply.error) || '宿主没有返回图像' });
+          }
+          const canvas = await canvasFromDataUrl(reply.dataUrl);
+          if (canvas === null) return finish({ error: '返回的图像无法解码' });
+          finish({ canvas });
+        };
+        try {
+          bridge.postMessage(JSON.stringify({ type: 'dsh-screenshot', id }));
+        } catch (error) {
+          finish({ error: '消息通道调用失败：' + (error && error.message ? error.message : error) });
+        }
+      });
+    }
+
+    /** Host → page entry point (installed once per frame). */
+    if (typeof window !== 'undefined' && typeof window.__dshShotReply !== 'function') {
+      window.__dshShotReply = (id, reply) => {
+        const registry = window.__dshShot || {};
+        const callback = registry[id];
+        if (typeof callback === 'function') callback(reply);
+      };
     }
 
     /* ------------------------------------------------------------------ *
@@ -222,6 +310,15 @@ window.__ModuleLoader__.load({
      *          or null when the user dismissed the picker.
      */
     async function grabFrame() {
+      // Desktop shell first: WebKitGTK's getDisplayMedia dies on KDE Wayland
+      // (GStreamer asserts on kwin's variable framerate range), so the native
+      // shell grabs one PNG through xdg-desktop-portal instead.  Browsers have
+      // no bridge and skip this entirely.
+      const native = await nativeCapture();
+      if (native && native.canvas) return native.canvas;
+      if (native && native.error) {
+        toast('原生截屏通道不可用（' + native.error + '），改用浏览器截屏…', true);
+      }
       if (typeof navigator === 'undefined' || navigator.mediaDevices === undefined
         || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
         throw new Error('当前环境不支持屏幕捕获（getDisplayMedia 不可用）');

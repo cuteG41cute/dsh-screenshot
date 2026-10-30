@@ -1,6 +1,6 @@
 // Real-browser compatibility gate for static/lib/client.js.
 //
-// The 1.2.1 fix was written against WebKitGTK (Linux desktop). This test loads
+// The 1.2.1 watchdog fix was written against WebKitGTK (Linux desktop); 1.3.1 adds the
 // the exact shipped bundle into a real Chromium engine (Edge/Chrome headless,
 // the engine the Windows/Web build actually runs on) over CDP and drives
 // grabFrame() through every branch the fix touched:
@@ -175,11 +175,11 @@ async function main() {
   // Probe version + mount contract + Windows happy path on the shipped bundle.
   const ua = await withPage(source, async (cdp, userAgent) => {
     await cdp.eval(PRELUDE);
-    await check('bundle mounts and the probe reports 1.2.1', async () => {
+    await check('bundle mounts and the probe reports 1.3.1', async () => {
       const probe = await cdp.eval(`({ version: window.__dshScreenshot.version,
         keys: Object.keys(window.__dshScreenshot).sort().join(','),
         injected: window.__injected })`);
-      assert(probe.version === '1.2.1', 'probe version is ' + probe.version);
+      assert(probe.version === '1.3.1', 'probe version is ' + probe.version);
       assert(probe.keys === 'attachFile,captureRegion,editImage,grabFrame,pickRegion,version',
         'probe surface changed: ' + probe.keys);
       assert(probe.injected.length === 1, 'expected one slot injection');
@@ -266,6 +266,67 @@ async function main() {
       })()`);
       assert(r.message !== null && r.message.indexOf('当前环境不支持屏幕捕获') === 0, 'message is ' + r.message);
       return r.message;
+    });
+
+    await check('native bridge: host reply becomes a canvas, no getDisplayMedia call', async () => {
+      const r = await cdp.eval(`(async () => {
+        window.__calls = [];
+        window.__nativeMsgs = [];
+        // 造一个桌面壳的桥：postMessage 把消息留住，随后由测试替宿主回话
+        window.chrome = { webview: { postMessage: (s) => { window.__nativeMsgs.push(JSON.parse(s)); } } };
+        const src = document.createElement('canvas');
+        src.width = 640; src.height = 480;
+        const g = src.getContext('2d'); g.fillStyle = '#2a7'; g.fillRect(0, 0, 640, 480);
+        const dataUrl = src.toDataURL('image/png');
+        window.__setGDM(async (c) => { window.__calls.push(c); return window.__stream(10, 10); });
+        const pending = window.__dshScreenshot.grabFrame();
+        // 等桥的消息到达，按 id 回话（正是宿主的做法）
+        let msg = null;
+        for (let i = 0; i < 100; i++) {
+          if (window.__nativeMsgs.length > 0) { msg = window.__nativeMsgs[0]; break; }
+          await new Promise((res) => setTimeout(res, 20));
+        }
+        if (msg === null) return { error: 'page never posted to the bridge' };
+        window.__dshShotReply(msg.id, { ok: true, dataUrl: dataUrl });
+        const frame = await pending;
+        window.__restoreGDM();
+        delete window.chrome;
+        return { type: msg.type, w: frame && frame.width, h: frame && frame.height,
+                 gdm: window.__calls.length };
+      })()`);
+      assert(r.error === undefined, r.error || 'bridge test failed');
+      assert(r.type === 'dsh-screenshot', 'unexpected message type: ' + r.type);
+      assert(r.w === 640 && r.h === 480, 'native frame is ' + r.w + 'x' + r.h);
+      assert(r.gdm === 0, 'native path still called getDisplayMedia (' + r.gdm + 'x)');
+      return 'type=' + r.type + ' ' + r.w + 'x' + r.h + ', 0 getDisplayMedia calls';
+    });
+
+    await check('native bridge failure falls back to getDisplayMedia', async () => {
+      const r = await cdp.eval(`(async () => {
+        window.__calls = [];
+        window.__nativeMsgs = [];
+        window.chrome = { webview: { postMessage: (s) => { window.__nativeMsgs.push(JSON.parse(s)); } } };
+        window.__setGDM(async (c) => { window.__calls.push(c); return window.__stream(320, 200); });
+        const pending = window.__dshScreenshot.grabFrame();
+        let msg = null;
+        for (let i = 0; i < 100; i++) {
+          if (window.__nativeMsgs.length > 0) { msg = window.__nativeMsgs[0]; break; }
+          await new Promise((res) => setTimeout(res, 20));
+        }
+        if (msg === null) return { error: 'page never posted to the bridge' };
+        window.__dshShotReply(msg.id, { ok: false, error: 'portal 不可用' });
+        const frame = await pending;
+        window.__restoreGDM();
+        delete window.chrome;
+        const toast = document.querySelector('[data-dsh-screenshot-toast]');
+        return { w: frame && frame.width, gdm: window.__calls.length,
+                 toast: toast ? toast.textContent : '' };
+      })()`);
+      assert(r.error === undefined, r.error || 'fallback test failed');
+      assert(r.gdm === 1, 'expected one getDisplayMedia attempt, got ' + r.gdm);
+      assert(r.w === 320, 'fallback frame width is ' + r.w);
+      assert(r.toast.indexOf('原生截屏通道不可用') === 0, 'toast is ' + JSON.stringify(r.toast));
+      return 'fallback ' + r.w + 'px after 1 getDisplayMedia call';
     });
 
     return userAgent;

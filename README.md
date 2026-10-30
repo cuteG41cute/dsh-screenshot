@@ -134,6 +134,41 @@ Host 半部（`lib/index.js`）不做事：整个功能都在浏览器侧，它�
 > 要让截图真正工作，仍需修好系统屏幕共享链路（KDE：`xdg-desktop-portal` + `xdg-desktop-portal-kde` + `PipeWire` 齐全并运行），
 > 或者用 Chromium 内核浏览器访问 Web 版。
 
+## 1.3.1：桌面壳原生截屏通道（Linux Wayland 的真正解法）
+
+1.2.1 只是让失败**可控**。根因在 WebKitGTK 里：KDE Wayland 上 kwin 的截屏流广播
+**可变帧率**（SPA EnumFormat `framerate=0/1`），WebKitGTK 的 GStreamer 胶囊协商直接断言失败——
+
+```
+gst_value_collect_int_range: assertion 'collect_values[0].v_int < collect_values[1].v_int' failed
+```
+
+于是 `getDisplayMedia()` 永远建不起流。1.3.1 让**桌面壳**绕开视频流：一次拿一张 PNG。
+
+```
+页面 grabFrame()
+  → 有 window.chrome.webview 桥 → postMessage({type:'dsh-screenshot', id})
+  → 桌面壳（Python）调 org.freedesktop.portal.Screenshot（interactive=false）
+  → portal 回一张 PNG 的 file:// → 转 data URL → evaluate_javascript 回传
+  → 页面 window.__dshShotReply(id, {ok, dataUrl}) → canvas
+  → 复用原有框选 / 标注 / 入附件（零改动）
+```
+
+| 要点 | 说明 |
+| --- | --- |
+| 没有桥就原样走浏览器 | 普通浏览器里 `nativeCapture()` 直接 resolve(null)，行为与 1.2.1 完全一致 |
+| 桥失败会回退 | 原生通道报错 → 先 toast 一条原因，再走 `getDisplayMedia`（看门狗仍在） |
+| **两个名字** | 注册表 `window.__dshShot[id]`，回传函数 `window.__dshShotReply(id,res)`；同名会让宿主把对象当函数调用，回传静默失败（原型的坑） |
+| 超时兜底 | 原生通道 30 秒；浏览器通道 45 秒看门狗不变 |
+
+真实 Chromium 里的验证（`node test/browser-compat.mjs`，9/9）：
+
+| 用例 | 结果 |
+| --- | --- |
+| 宿主回 `{ok:true, dataUrl}` | 拿到 **640×480 canvas**，`getDisplayMedia` **0 次**调用 |
+| 宿主回 `{ok:false}` | 回退到浏览器通道（1 次调用拿到 320px），并弹出「原生截屏通道不可用…」toast |
+| 无桥（普通浏览器） | 6 项原有用例全部通过，行为未变 |
+
 ## Windows / Chromium 兼容性（1.2.1 同版验证）
 
 1.2.1 的修复是从 Linux 侧提出的，但**只有一条代码线**，不是 Linux 分支。理由与证据：

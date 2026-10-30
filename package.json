@@ -1,6 +1,6 @@
 {
   "name": "dsh-screenshot",
-  "version": "1.2.1",
+  "version": "1.3.1",
   "private": true,
   "description": "Repository metadata for the dsh-screenshot plugin. The installable DeepSeek Harness package lives in static/ (see static/package.json).",
   "type": "module",
