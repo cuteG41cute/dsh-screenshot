@@ -1,6 +1,6 @@
 {
   "name": "dsh-screenshot",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Repository metadata for the dsh-screenshot plugin. The installable DeepSeek Harness package lives in static/ (see static/package.json).",
   "type": "module",
@@ -21,6 +21,8 @@
     "screen-capture"
   ],
   "scripts": {
-    "test": "node test/bundle-smoke.mjs"
+    "test": "node test/bundle-smoke.mjs",
+    "test:compat": "node test/browser-compat.mjs",
+    "test:all": "node test/bundle-smoke.mjs && node test/browser-compat.mjs"
   }
 }

@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 window.__DSH_BOOT__.entries.some(e => e.id === 'dsh-screenshot')   // → true
 
 // 2. 探针可用
-window.__dshScreenshot.version                                      // → '1.2.0'
+window.__dshScreenshot.version                                      // → '1.2.1'
 
 // 3. 按钮在 DOM 里（输入框同排）
 document.querySelector('[data-dsh-screenshot="button"]')            // → <button>
@@ -95,7 +95,8 @@ curl.exe -s -o NUL -w "%{http_code}`n" http://127.0.0.1:3080/plugins/dsh-screens
 离线自检（不需要浏览器/harness）：
 
 ```powershell
-node test/bundle-smoke.mjs    # 8 项检查：bundle 加载 / 槽位注册 / 渲染 / 附件注入
+node test/bundle-smoke.mjs      # 10 项：bundle 加载 / 槽位注册 / 渲染 / 附件注入 / 捕获分支
+node test/browser-compat.mjs    # 7 项：真实 Chromium 里跑完整捕获链路（Windows 基线）
 ```
 
 ## 实现要点
@@ -133,6 +134,30 @@ Host 半部（`lib/index.js`）不做事：整个功能都在浏览器侧，它�
 > 要让截图真正工作，仍需修好系统屏幕共享链路（KDE：`xdg-desktop-portal` + `xdg-desktop-portal-kde` + `PipeWire` 齐全并运行），
 > 或者用 Chromium 内核浏览器访问 Web 版。
 
+## Windows / Chromium 兼容性（1.2.1 同版验证）
+
+1.2.1 的修复是从 Linux 侧提出的，但**只有一条代码线**，不是 Linux 分支。理由与证据：
+
+| 验证 | 手段 | 结果 |
+| --- | --- | --- |
+| 完整捕获链路 | 真实 Chromium（Edge 156 headless）+ CDP，用 `canvas.captureStream()` 提供**真 MediaStream**，跑 `video.play() → videoWidth → drawImage → canvas` | **250 ms** 拿到 640×480 画面，只调用 1 次 `getDisplayMedia`（无多余重试） |
+| 约束未被改动 | 断言首次调用参数仍是 `{video, audio, selfBrowserSurface:'exclude'}` | 通过 |
+| 用户取消 | `getDisplayMedia` 抛 `NotAllowedError` | 1 ms 返回 `null`，1 次尝试，不弹错 |
+| 约束降级 | 首次抛 `OverconstrainedError`，第二次成功 | 第 2 次参数严格等于 `{video:true,audio:false}` |
+| 硬失败提示 | 抛 `NotFoundError` | 中文提示「未找到可捕获的屏幕/窗口源」，不挂起 |
+| 死链路兜底 | `getDisplayMedia` 永不返回（看门狗临时缩到 700 ms 测） | 715 ms 抛超时、只尝试 1 次、不再重试 |
+| 无 API 环境 | `navigator.mediaDevices` 缺失 | 「当前环境不支持屏幕捕获」，不抛栈 |
+| 挂载契约 | `apply()` 注册 `conversation.input.left#dsh-screenshot`、按钮可渲染、探针 6 个键 | 与 1.2.0 一致 |
+
+```
+node test/browser-compat.mjs
+# 7/7 PASS  engine: HeadlessChrome/156 Edg/156  (Windows NT 10.0; Win64; x64)
+```
+
+三条改动都是**只在异常/超时才走**的兜底路径：Windows 正常路径上 `getDisplayMedia` 立即 resolve，
+看门狗被 `clearTimeout`（实测 250 ms 完成），约束降级分支永不进入。因此不需要分叉分支；
+`main` 同时是 Linux 与 Windows 的发布线。
+
 ## 已知限制
 
 - **必须重启一次 harness**：静态插件在启动时装载，无法在会话内热加。
@@ -158,7 +183,9 @@ dsh-screenshot/
 │   └── lib/
 │       ├── index.js          # Host 半部（惰性）
 │       └── client.js         # 浏览器 bundle：按钮 + 框选遮罩 + 附件注入
-├── test/bundle-smoke.mjs     # 离线自检（8 项）
+├── test/
+│   ├── bundle-smoke.mjs      # 离线自检（10 项，无需浏览器）
+│   └── browser-compat.mjs    # 真实 Chromium 捕获链路（7 项，Windows 兼容基线）
 ├── install.ps1
 ├── uninstall.ps1
 └── README.md
