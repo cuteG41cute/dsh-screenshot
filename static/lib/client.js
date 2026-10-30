@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
-    const VERSION = '1.2.0';
+    const VERSION = '1.2.1';
     const STYLE_TAG_ID = 'dsh-screenshot/styles';
     const BTN_CLASS = 'dsh-screenshot-btn';
     const PLUGIN_ID = 'dsh-screenshot';
@@ -140,41 +140,115 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Watchdog for getDisplayMedia: on engines whose screen-capture backend is
+     * broken (e.g. WebKitGTK when the ScreenCast portal or PipeWire socket is
+     * unavailable) the promise neither resolves nor rejects â it hangs forever
+     * and the composer button spins indefinitely. A pending system picker also
+     * looks identical from JS, so the budget is generous (45s) and the error
+     * text tells the user what to check instead of leaving a stuck button.
+     */
+    const CAPTURE_WATCHDOG_MS = 45000;
+
+    /** Map a raw getUserMedia/getDisplayMedia failure to an actionable message. */
+    function describeCaptureError(error) {
+      const name = error && error.name !== undefined ? String(error.name) : '';
+      const detail = error && error.message !== undefined && error.message !== '' ? '：' + String(error.message) : '';
+      if (name === 'OverconstrainedError') {
+        return '屏幕捕获被拒绝（' + name + '）：当前浏览器引擎的屏幕共享后端不可用。'
+          + 'Linux/WebKitGTK 下请确认 xdg-desktop-portal 与 PipeWire 正常运行；或改用 Chrome/Edge 等浏览器访问本页面。';
+      }
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        return '未找到可捕获的屏幕/窗口源' + detail + '。';
+      }
+      if (name === 'NotReadableError' || name === 'TrackStartError') {
+        return '屏幕捕获源无法读取（可能被其他程序占用）' + detail + '。';
+      }
+      if (name === 'SecurityError') {
+        return '当前页面环境不允许屏幕捕获（需要安全上下文）' + detail + '。';
+      }
+      return '屏幕捕获失败（' + (name !== '' ? name : '未知错误') + '）' + detail + '。';
+    }
+
+    /**
+     * One getDisplayMedia attempt with a watchdog, resolved with the frozen
+     * first frame. Rejects with the raw error (or a timeout Error).
+     */
+    function grabFrameOnce(options) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (fn, value) => {
+          if (settled === true) return;
+          settled = true;
+          clearTimeout(watchdog);
+          fn(value);
+        };
+        const watchdog = setTimeout(() => {
+          settle(reject, new Error(
+            '屏幕捕获请求超时（' + Math.round(CAPTURE_WATCHDOG_MS / 1000) + ' 秒无响应）：'
+            + '选屏对话框一直未返回。通常是当前环境的屏幕共享通道不可用'
+            + '（Linux/WebKitGTK 需要 xdg-desktop-portal + PipeWire）。'
+            + '请检查系统屏幕共享设置，或改用 Chrome/Edge 等浏览器访问本页面。'
+          ));
+        }, CAPTURE_WATCHDOG_MS);
+        navigator.mediaDevices.getDisplayMedia(options).then(async (stream) => {
+          try {
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.muted = true;
+            video.playsInline = true;
+            await video.play();
+            const ready = await waitFor(() => video.videoWidth > 0 && video.videoHeight > 0, 5000);
+            if (ready !== true) throw new Error('无法读取捕获画面的尺寸');
+            // Two paint opportunities so the decoder has produced a real frame.
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const frame = document.createElement('canvas');
+            frame.width = video.videoWidth;
+            frame.height = video.videoHeight;
+            frame.getContext('2d').drawImage(video, 0, 0);
+            video.srcObject = null;
+            settle(resolve, frame);
+          } catch (error) {
+            settle(reject, error);
+          } finally {
+            for (const track of stream.getTracks()) track.stop();
+          }
+        }).catch((error) => settle(reject, error));
+      });
+    }
+
+    /**
      * Ask for a display surface and freeze its first frame.
      * @returns the frozen frame as a canvas at native captured resolution,
      *          or null when the user dismissed the picker.
      */
     async function grabFrame() {
-      const options = { video: true, audio: false, selfBrowserSurface: 'exclude' };
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia(options);
-      } catch (error) {
-        // A dismissed picker and a hard failure are indistinguishable here;
-        // NotAllowedError is the dismissed/cancelled case.
-        const name = error && error.name !== undefined ? String(error.name) : '';
-        if (name === 'NotAllowedError' || name === 'AbortError') return null;
-        throw error;
+      if (typeof navigator === 'undefined' || navigator.mediaDevices === undefined
+        || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+        throw new Error('当前环境不支持屏幕捕获（getDisplayMedia 不可用）');
       }
-      try {
-        const video = document.createElement('video');
-        video.srcObject = stream;
-        video.muted = true;
-        video.playsInline = true;
-        await video.play();
-        const ready = await waitFor(() => video.videoWidth > 0 && video.videoHeight > 0, 5000);
-        if (ready !== true) throw new Error('无法读取捕获画面的尺寸');
-        // Two paint opportunities so the decoder has produced a real frame.
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const frame = document.createElement('canvas');
-        frame.width = video.videoWidth;
-        frame.height = video.videoHeight;
-        frame.getContext('2d').drawImage(video, 0, 0);
-        video.srcObject = null;
-        return frame;
-      } finally {
-        for (const track of stream.getTracks()) track.stop();
+      // First attempt keeps the original constraints; if the engine rejects them
+      // (some WebKit builds choke on selfBrowserSurface) retry once with the
+      // bare minimum before reporting failure.
+      const attempts = [
+        { video: true, audio: false, selfBrowserSurface: 'exclude' },
+        { video: true, audio: false },
+      ];
+      let lastError;
+      for (let i = 0; i < attempts.length; i++) {
+        try {
+          return await grabFrameOnce(attempts[i]);
+        } catch (error) {
+          const name = error && error.name !== undefined ? String(error.name) : '';
+          // A dismissed picker and a hard failure are indistinguishable here;
+          // NotAllowedError is the dismissed/cancelled case.
+          if (name === 'NotAllowedError' || name === 'AbortError') return null;
+          if (error instanceof Error && error.message.indexOf('屏幕捕获请求超时') === 0) {
+            throw error; // watchdog fired: no point retrying the same dead backend
+          }
+          lastError = error;
+        }
       }
+      throw new Error(describeCaptureError(lastError));
     }
 
     /**

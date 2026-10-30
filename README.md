@@ -110,6 +110,29 @@ node test/bundle-smoke.mjs    # 8 项检查：bundle 加载 / 槽位注册 / 渲
 
 Host 半部（`lib/index.js`）不做事：整个功能都在浏览器侧，它存在只是为了让组合能加载这个包、从而让客户端 bundle 进入 boot 图谱。
 
+## Linux 环境适配（1.2.1）
+
+在 **WebKitGTK 桌面壳**（Linux 版 dsh-desktop）上，点截图按钮可能**一直转圈**：
+
+- 插件用 `navigator.mediaDevices.getDisplayMedia` 取画面；Windows 的 WebView2（Chromium）这条路成熟，
+  Linux 的 WebKitGTK 需要 `xdg-desktop-portal` → PipeWire → 合成器；
+- 该系统链路损坏时（日志：`Unable to open pipewire remote: 已到超时限制`，随后 `OverconstrainedError`），
+  **请求会永久挂起**；1.2.0 对此没有兜底，按钮 `busy` 永远是 true，也没有任何提示。
+
+1.2.1 的处理（只改 `static/lib/client.js`，宿主端 `lib/index.js` 未动）：
+
+| 改动 | 作用 |
+| --- | --- |
+| **45 秒看门狗** | `getDisplayMedia` 既不 resolve 也不 reject 时强制结束，按钮恢复并弹出说明性提示 |
+| **约束降级重试** | 先带 `selfBrowserSurface:"exclude"`；被引擎拒绝时退回 `{video:true,audio:false}` 再试一次 |
+| **错误分类** | `describeCaptureError()` 把 `OverconstrainedError` / `NotFoundError` / `NotReadableError` / `SecurityError` 映射成可操作的中文提示（含 Linux 通道排查指引） |
+| **能力检查前移** | `grabFrame()` 自身也检查 `getDisplayMedia` 是否存在（原来只在 `captureRegion` 检查） |
+| 取消语义不变 | 用户关掉选屏框（`NotAllowedError` / `AbortError`）静默返回 `null`，不算错误 |
+
+> ⚠️ 这属于「环境不适配」的**可控失败**：它让插件在链路坏掉时给出明确原因，**不等于截图就能用了**。
+> 要让截图真正工作，仍需修好系统屏幕共享链路（KDE：`xdg-desktop-portal` + `xdg-desktop-portal-kde` + `PipeWire` 齐全并运行），
+> 或者用 Chromium 内核浏览器访问 Web 版。
+
 ## 已知限制
 
 - **必须重启一次 harness**：静态插件在启动时装载，无法在会话内热加。

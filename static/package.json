@@ -1,6 +1,6 @@
 {
   "name": "dsh-screenshot",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "DeepSeek Harness static plugin: a screenshot button in the conversation composer (same row as + and the paperclip) that captures a picked screen/window whole (one Enter) or a dragged region, then annotates it (pen, rectangle, ellipse, arrow, text) and stages the composite as a pending draft attachment.",
   "type": "module",
   "main": "lib/index.js",
