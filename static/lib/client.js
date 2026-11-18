@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
-    const VERSION = '1.4.0';
+    const VERSION = '1.4.1';
     const STYLE_TAG_ID = 'dsh-screenshot/styles';
     const BTN_CLASS = 'dsh-screenshot-btn';
     const PLUGIN_ID = 'dsh-screenshot';
@@ -278,6 +278,21 @@ window.__ModuleLoader__.load({
      */
     function grabFrameOnce(options) {
       return new Promise((resolve, reject) => {
+        // Conditional Focus (Chrome/Edge 109+). Chromium's default is to bring the
+        // surface you just picked to the front, so screenshotting a background
+        // window yanks it above everything else and it stays there afterwards.
+        // Asking for 'no-focus-change' keeps focus where the user left it, which
+        // is exactly what a screenshot tool wants.
+        let controller = null;
+        if (typeof CaptureController === 'function') {
+          try {
+            controller = new CaptureController();
+            controller.setFocusBehavior('no-focus-change');
+          } catch (error) {
+            controller = null;
+          }
+        }
+        const request = controller === null ? options : Object.assign({}, options, { controller: controller });
         let settled = false;
         const settle = (fn, value) => {
           if (settled === true) return;
@@ -293,7 +308,12 @@ window.__ModuleLoader__.load({
             + '请检查系统屏幕共享设置，或改用 Chrome/Edge 等浏览器访问本页面。'
           ));
         }, CAPTURE_WATCHDOG_MS);
-        navigator.mediaDevices.getDisplayMedia(options).then(async (stream) => {
+        navigator.mediaDevices.getDisplayMedia(request).then(async (stream) => {
+          // Setting it once more right after the promise fulfils is the other
+          // slot the spec allows (monitors throw here - nothing to focus).
+          if (controller !== null) {
+            try { controller.setFocusBehavior('no-focus-change'); } catch (error) { /* monitor source */ }
+          }
           try {
             const video = document.createElement('video');
             video.srcObject = stream;

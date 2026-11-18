@@ -18,13 +18,27 @@ import vm from 'node:vm'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const results = []
+const running = []
 function check(name, fn) {
+  let detail
   try {
-    const detail = fn()
-    results.push({ name, ok: true, detail: detail === undefined ? '' : String(detail) })
+    detail = fn()
   } catch (error) {
     results.push({ name, ok: false, detail: String(error && error.message ? error.message : error) })
+    return
   }
+  // Async checks used to be recorded as "passed" with the Promise itself as the
+  // detail, so a failing assertion inside them never failed the run.
+  if (detail !== null && detail !== undefined && typeof detail.then === 'function') {
+    const record = { name, ok: true, detail: '(async)' }
+    results.push(record)
+    running.push(detail.then(
+      (value) => { record.detail = value === undefined ? '' : String(value) },
+      (error) => { record.ok = false; record.detail = String(error && error.message ? error.message : error) },
+    ))
+    return
+  }
+  results.push({ name, ok: true, detail: detail === undefined ? '' : String(detail) })
 }
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -229,10 +243,15 @@ check('attachFile() drives the composer file input (paperclip pipeline)', () => 
 })
 
 check('captureRegion() reports a clear error when the API is unavailable', async () => {
-  // Synchronous probe only: call and inspect the rejection message.
-  const promise = sandbox.window.__dshScreenshot.captureRegion()
-  assert(promise instanceof Promise || typeof promise.then === 'function', 'captureRegion did not return a promise')
-  return 'returns a promise (async rejection is handled by the caller)'
+  let message = null
+  try {
+    await sandbox.window.__dshScreenshot.captureRegion()
+  } catch (error) {
+    message = String(error && error.message ? error.message : error)
+  }
+  assert(message !== null, 'captureRegion did not reject without getDisplayMedia')
+  assert(message.indexOf('当前环境不支持屏幕捕获') === 0, 'unexpected message: ' + message)
+  return 'rejects: ' + message
 })
 
 check('pickRegion() builds the overlay with the whole frame pre-selected', () => {
@@ -284,9 +303,41 @@ check('editImage() builds the annotation toolbar over the crop', () => {
   return 'tools=' + tools.join(',') + ' colours=' + colors.length + ' actions=' + actions.join(',')
 })
 
+check('grabFrame() asks the browser to keep focus on this page (Conditional Focus)', async () => {
+  const calls = { focus: [], options: null, getDisplayMedia: 0 }
+  sandbox.CaptureController = class CaptureControllerStub {
+    setFocusBehavior(value) { calls.focus.push(value) }
+  }
+  const originalCreate = documentStub.createElement
+  documentStub.createElement = (tag) => {
+    const element = originalCreate(tag)
+    if (tag === 'video') {
+      element.play = () => Promise.resolve()
+      element.videoWidth = 800
+      element.videoHeight = 600
+    }
+    return element
+  }
+  sandbox.navigator.mediaDevices.getDisplayMedia = (options) => {
+    calls.getDisplayMedia += 1
+    calls.options = options
+    return Promise.resolve({ getTracks: () => [], getVideoTracks: () => [] })
+  }
+  const frame = await sandbox.window.__dshScreenshot.grabFrame()
+  documentStub.createElement = originalCreate
+  assert(frame !== null && frame !== undefined, 'grabFrame returned nothing: ' + frame)
+  assert(calls.getDisplayMedia === 1, 'expected one getDisplayMedia call, got ' + calls.getDisplayMedia)
+  assert(calls.options && calls.options.controller !== undefined, 'no controller passed to getDisplayMedia')
+  assert(calls.focus.length > 0, 'setFocusBehavior was never called')
+  assert(calls.focus.every((value) => value === 'no-focus-change'),
+    'unexpected focus behaviour: ' + calls.focus.join(','))
+  return 'focus=' + calls.focus.join(',') + ' frame=' + frame.width + 'x' + frame.height
+})
+
 /* ------------------------------------------------------------------ *
  * report
  * ------------------------------------------------------------------ */
+await Promise.all(running)
 let failed = 0
 for (const item of results) {
   if (item.ok !== true) failed += 1
