@@ -238,6 +238,41 @@ systemctl --user status xdg-desktop-portal xdg-desktop-portal-gnome pipewire
 三者都在（Ubuntu 26.04 默认如此）时，点截图会弹浏览器自己的「选择共享内容」对话框，选一次即可。
 缺了它们，插件会在 45 秒后给出明确错误，而不是静默卡死——这就是 1.2.1 看门狗存在的意义。
 
+## 1.4.1：截图不再把目标窗口顶到最前（Conditional Focus）
+
+**症状**：截完一个后台窗口后，那个窗口会跳到最前面并停在最上层，用户得再点回浏览器才能继续干活。
+
+**原因不在插件**：Chromium/Edge 从 109 起实现了 *Conditional Focus*，`getDisplayMedia()` 的**默认行为是把用户刚选的屏幕/窗口带到前台**
+（见 [Chromium CL: Bring Aura Window To Front When Sharing](https://codereview.chromium.org/2617613002)）。
+这是为视频会议设计的（共享谁就看谁），但对截图工具来说正好相反——我们要的是「不动用户的窗口堆叠」。
+
+**修法**：显式关掉这个焦点转移。
+
+```js
+const controller = new CaptureController();
+controller.setFocusBehavior('no-focus-change');   // 调用 getDisplayMedia 之前
+const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, controller });
+// Promise resolve 后再设一次（规范允许的另一个时机；屏幕源会抛异常，忽略即可）
+```
+
+按 [MDN](https://developer.mozilla.org/en-US/docs/Web/API/CaptureController/setFocusBehavior) 的语义，这两个时机都合法，插件两处都设了，避免不同版本实现只认其中一个。
+
+**A/B 实测**（Edge 158，同一个源窗口 `window:8589510:0`，捕获后 2.4 秒内每 200ms 采样 `document.hasFocus()`）：
+
+| 轮次 | 捕获前 | 捕获后 12 个采样点 |
+| --- | --- | --- |
+| 不加控制器（默认） | `true` | **`false` × 12** —— 目标窗口被顶到前台 |
+| 加 `no-focus-change` | `true` | **`true` × 12** —— 焦点不动，窗口堆叠保持原样 |
+
+**兼容性**：`CaptureController` 目前只有 Chromium 系（Chrome / Edge 109+）支持；Firefox/Safari 没有这个 API，
+插件会自动降级为原来的行为（不传控制器参数），截图功能不受影响，只是仍可能被顶到前台。
+捕获**整个屏幕**时本来就没有可聚焦的窗口，所以不受此问题影响。
+
+**回归测试**：`node test/bundle-smoke.mjs` 新增一项，用桩 `CaptureController` 断言「控制器被传进 `getDisplayMedia`、两种时机都设了 `no-focus-change`」；
+并顺带修掉了测试框架里**异步检查假通过**的漏洞（以前把 Promise 当结果记成 PASS）。
+
+## Windows / Chromium 兼容性（1.2.1 同版验证）
+
 
 
 1.2.1 的修复是从 Linux 侧提出的，但**只有一条代码线**，不是 Linux 分支。理由与证据：
