@@ -271,6 +271,33 @@ const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, contr
 **回归测试**：`node test/bundle-smoke.mjs` 新增一项，用桩 `CaptureController` 断言「控制器被传进 `getDisplayMedia`、两种时机都设了 `no-focus-change`」；
 并顺带修掉了测试框架里**异步检查假通过**的漏洞（以前把 Promise 当结果记成 PASS）。
 
+## 1.4.2：高分屏下预览不再发虚
+
+**症状**：在 200% 缩放的屏幕上，框选遮罩里的画面明显糊——比真实截图软一大截。
+
+**原因**：遮罩里的预览 canvas 是按 **CSS 像素**建的（1300×731）。而 200% 屏幕上显卡要铺 2600×1462 个物理像素，浏览器只能把这张位图**放大一倍**，等于白丢一半清晰度。截图本身没损失（导出的仍是原生分辨率），糊的只是"看"。
+
+**修法**：后备位图按 `devicePixelRatio` 建，CSS 尺寸不变：
+
+```js
+const dpr = Math.max(1, window.devicePixelRatio || 1);
+view.width = Math.round(dw * dpr);   // 2600
+view.style.width = dw + 'px';        // 1300
+```
+
+再配 `imageSmoothingQuality = 'high'`：源图比显示区大时（4K 屏窗口化之类）下采样也更干净。
+
+**实测**（CDP 模拟 200% DPI，Linux + Chrome 158）：
+
+| 项 | 结果 |
+| --- | --- |
+| 遮罩 CSS 尺寸 | 1300 × 731 |
+| 后备位图 | **2600 × 1462** |
+| 每 CSS 像素 | **2.00 个物理像素**（1:1，不再被放大） |
+| 标注画布 | 3200 × 1800 原生裁剪，显示时下采样（本来就是清的） |
+
+资源几乎没有代价：遮罩位图最大就是"屏幕物理分辨率"，和旧版只差一倍显存（几百 KB 到十几 MB），而且只在这几秒的遮罩期间存在。
+
 ## Windows / Chromium 兼容性（1.2.1 同版验证）
 
 

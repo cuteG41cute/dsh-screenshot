@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
-    const VERSION = '1.4.1';
+    const VERSION = '1.4.2';
     const STYLE_TAG_ID = 'dsh-screenshot/styles';
     const BTN_CLASS = 'dsh-screenshot-btn';
     const PLUGIN_ID = 'dsh-screenshot';
@@ -419,12 +419,21 @@ window.__ModuleLoader__.load({
         overlay.setAttribute('data-dsh-screenshot-overlay', '');
         overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:#000;cursor:crosshair;user-select:none;';
 
+        // HiDPI: a canvas sized in CSS pixels gets upscaled by the compositor
+        // (2x on a 200% display), which is exactly why the frozen frame looked
+        // soft. Size the backing store in device pixels instead - same CSS box,
+        // sharp pixels. The backing stays bounded by the physical screen because
+        // dw/dh already fit the viewport.
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
         const view = document.createElement('canvas');
-        view.width = dw;
-        view.height = dh;
+        view.width = Math.round(dw * dpr);
+        view.height = Math.round(dh * dpr);
         view.style.cssText =
           'position:absolute;left:' + offX + 'px;top:' + offY + 'px;width:' + dw + 'px;height:' + dh + 'px;pointer-events:none;';
-        view.getContext('2d').drawImage(frame, 0, 0, dw, dh);
+        const viewContext = view.getContext('2d');
+        viewContext.imageSmoothingEnabled = true;
+        try { viewContext.imageSmoothingQuality = 'high'; } catch (error) { /* older engines */ }
+        viewContext.drawImage(frame, 0, 0, view.width, view.height);
 
         const selection = document.createElement('div');
         selection.style.cssText =
