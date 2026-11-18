@@ -156,10 +156,10 @@ gst_value_collect_int_range: assertion 'collect_values[0].v_int < collect_values
 
 | 要点 | 说明 |
 | --- | --- |
-| 没有桥就原样走浏览器 | 普通浏览器里 `nativeCapture()` 直接 resolve(null)，行为与 1.2.1 完全一致 |
+| 没有桥就原样走浏览器 | 普通浏览器里 `nativeCapture()` 直接 resolve(null)；**1.4.0 起还要求宿主声明 `window.__dshShotNative = true`** |
 | 桥失败会回退 | 原生通道报错 → 先 toast 一条原因，再走 `getDisplayMedia`（看门狗仍在） |
 | **两个名字** | 注册表 `window.__dshShot[id]`，回传函数 `window.__dshShotReply(id,res)`；同名会让宿主把对象当函数调用，回传静默失败（原型的坑） |
-| 超时兜底 | 原生通道 30 秒；浏览器通道 45 秒看门狗不变 |
+| 超时兜底 | 原生通道 15 秒（1.4.0 从 30 秒收紧）；浏览器通道 45 秒看门狗不变 |
 
 真实 Chromium 里的验证（`node test/browser-compat.mjs`，9/9）：
 
@@ -169,7 +169,76 @@ gst_value_collect_int_range: assertion 'collect_values[0].v_int < collect_values
 | 宿主回 `{ok:false}` | 回退到浏览器通道（1 次调用拿到 320px），并弹出「原生截屏通道不可用…」toast |
 | 无桥（普通浏览器） | 6 项原有用例全部通过，行为未变 |
 
-## Windows / Chromium 兼容性（1.2.1 同版验证）
+## 1.4.0：Linux 实机验证 + 两处跨平台修复
+
+1.3.1 的原生通道是在 Linux 上设计的，但此前**没有在真实 Linux 机器上跑过完整链路**。1.4.0 补上了这一步，并修掉过程中暴露的两个真实缺陷。
+
+### 实机验证
+
+环境：**Ubuntu 26.04.1 LTS（GNOME Wayland，内核 7.0.0）+ dsh 0.2.2-rc.1 + Chrome 158**，虚拟机上全新安装插件后，用 CDP 程序化驱动真实浏览器走完整条链路：
+
+| 环节 | 结果 |
+| --- | --- |
+| boot 图谱 | `dsh-screenshot/client.js&rev=…` 在首页里，探针 `__dshScreenshot.version = 1.4.0` |
+| 按钮 | 出现在输入框底部工具栏，文案与 Windows 完全一致 |
+| 点击 → 捕获遮罩 | ✅ 整幅默认选中，角标 `1600 × 900`，底部「整幅画面 · Enter / 取消 · Esc」齐全 |
+| 标注编辑器 | ✅ 5 个工具（画笔/矩形/圆形/箭头/文字）、6 种颜色、撤销/清空/取消/完成 |
+| 真实鼠标事件绘制 | ✅ 画笔折线 + 箭头两笔都落在画布上 |
+| 完成 → 附件 | ✅ `[data-composer-card] img` 出现 1 张，`naturalWidth×Height = 1600×900`（**原始分辨率**，不是缩放后的二次截图） |
+| toast | ✅ 「截图已加入待发送附件」 |
+| 控制台错误 | **0** |
+
+> 测试方法说明：Xvfb 下 Chrome 的 X11 桌面捕获枚举不到源（`getDisplayMedia` 永远 pending、连选择器都不弹），
+> 这是无合成器环境的表现，不是插件问题。因此**捕获流的来源**用 Chrome 的 `--use-fake-device-for-media-stream`
+> 代替，**插件侧代码路径与真实用户完全一致**（同一个 `getDisplayMedia` 调用、同一套冻结/框选/标注/导出）。
+> 真实桌面上的选择器由浏览器自己弹出，用户点一次即可。
+
+### 修复 1：隐藏/被遮挡页面导致截图永久挂起
+
+冻结首帧时用的是 `requestAnimationFrame(() => requestAnimationFrame(resolve))`。**隐藏页面里 rAF 永不触发**——
+切到别的标签页再点截图、或窗口被最小化/遮挡时，整个捕获会卡死（`busy` 一直是 true，连看门狗都被节流）。
+
+1.4.0 改成 **rAF + 400ms 定时器兜底**，两条路先到的赢。这是实操中很容易撞到的场景，不只是测试环境的怪癖。
+
+### 修复 2：`window.chrome.webview` 存在 ≠ 宿主支持原生通道
+
+1.3.1 只要看到 `window.chrome.webview` 就 `postMessage` 并等回包。但**Windows 桌面壳（WebView2）也有这个对象**，
+却没有处理这个消息的代码——结果是每次点击先干等 30 秒超时、弹一条红色「原生截屏通道不可用」，才回退到 `getDisplayMedia`。
+
+1.4.0 起原生通道必须**由宿主显式声明**：
+
+```js
+window.__dshShotNative = true;   // 桌面壳在注入脚本里声明「我能截」
+```
+
+没有这个标志就完全跳过原生通道、直接走浏览器捕获（普通浏览器和 Windows 桌面壳都是这条路），超时也缩短到 15 秒。
+**对 Windows 用户而言这是修复**：不再有 30 秒空等。
+
+### Linux 安装
+
+```bash
+git clone https://github.com/cuteG41cute/dsh-screenshot.git
+cd dsh-screenshot
+./install.sh                     # 默认 ~/.dsh/profiles/web
+./uninstall.sh                   # 卸载（可 --restore-backup 还原）
+```
+
+`install.sh` 处理了 0.2.x 的三个现实问题：profile 的 `cordis.patch.yml` 初始是空数组 `[]`（直接追加会破坏 YAML，
+现在会先删掉那行再追加）；profile 没有 `node_modules/@deepseek-ai/cordis`（自动软链到 dsh 自带的那份）；
+每次安装前把 patch 与旧包备份到 `<profile>/_backup/dsh-screenshot-<时间戳>/`。
+
+### 前置条件（Linux 浏览器访问）
+
+浏览器要能捕获屏幕，需要**系统屏幕共享通道**在跑：
+
+```bash
+systemctl --user status xdg-desktop-portal xdg-desktop-portal-gnome pipewire
+```
+
+三者都在（Ubuntu 26.04 默认如此）时，点截图会弹浏览器自己的「选择共享内容」对话框，选一次即可。
+缺了它们，插件会在 45 秒后给出明确错误，而不是静默卡死——这就是 1.2.1 看门狗存在的意义。
+
+
 
 1.2.1 的修复是从 Linux 侧提出的，但**只有一条代码线**，不是 Linux 分支。理由与证据：
 

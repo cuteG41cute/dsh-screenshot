@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots'];
 
-    const VERSION = '1.3.1';
+    const VERSION = '1.4.0';
     const STYLE_TAG_ID = 'dsh-screenshot/styles';
     const BTN_CLASS = 'dsh-screenshot-btn';
     const PLUGIN_ID = 'dsh-screenshot';
@@ -81,8 +81,6 @@ window.__ModuleLoader__.load({
         '.' + BTN_CLASS + ':hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));',
         'color:var(--dsw-alias-label-primary,#222)}',
         '.' + BTN_CLASS + ':disabled{opacity:.45;cursor:default}',
-        '.dsh-screenshot-spin{animation:dsh-screenshot-spin 1s linear infinite}',
-        '@keyframes dsh-screenshot-spin{to{transform:rotate(360deg)}}',
       ].join('');
       document.head.appendChild(tag);
     }
@@ -126,13 +124,27 @@ window.__ModuleLoader__.load({
      * call an object and the reply dies silently (that was the original bug).
      * ------------------------------------------------------------------ */
 
-    const NATIVE_CAPTURE_TIMEOUT_MS = 30000;
+    const NATIVE_CAPTURE_TIMEOUT_MS = 15000;
 
     /** True when a desktop shell exposes the message bridge. */
     function nativeBridge() {
       if (typeof window === 'undefined' || !window.chrome || !window.chrome.webview) return null;
       const view = window.chrome.webview;
       return typeof view.postMessage === 'function' ? view : null;
+    }
+
+    /**
+     * True only when a shell ADVERTISED the capture channel.
+     *
+     * A bare WebView2 host (the usual Windows desktop shell) also exposes
+     * window.chrome.webview but has no handler for this message, so messaging it
+     * blindly cost a full timeout on every single click before falling back.
+     * Support therefore has to be declared: the shell sets
+     * `window.__dshShotNative = true` once it can answer.
+     */
+    function nativeAdvertised() {
+      if (typeof window === 'undefined') return false;
+      return window.__dshShotNative === true && nativeBridge() !== null;
     }
 
     function canvasFromDataUrl(dataUrl) {
@@ -157,6 +169,9 @@ window.__ModuleLoader__.load({
      *          failed, or null when there is no desktop shell (plain browser).
      */
     function nativeCapture() {
+      // Everything that did not advertise the channel (plain browsers, the
+      // Windows WebView2 shell) skips the round trip entirely.
+      if (nativeAdvertised() !== true) return Promise.resolve(null);
       const bridge = nativeBridge();
       if (bridge === null) return Promise.resolve(null);
       return new Promise((resolve) => {
@@ -231,7 +246,7 @@ window.__ModuleLoader__.load({
      * Watchdog for getDisplayMedia: on engines whose screen-capture backend is
      * broken (e.g. WebKitGTK when the ScreenCast portal or PipeWire socket is
      * unavailable) the promise neither resolves nor rejects â it hangs forever
-     * and the composer button spins indefinitely. A pending system picker also
+     * and the composer button stays disabled forever. A pending system picker also
      * looks identical from JS, so the budget is generous (45s) and the error
      * text tells the user what to check instead of leaving a stuck button.
      */
@@ -287,8 +302,20 @@ window.__ModuleLoader__.load({
             await video.play();
             const ready = await waitFor(() => video.videoWidth > 0 && video.videoHeight > 0, 5000);
             if (ready !== true) throw new Error('无法读取捕获画面的尺寸');
-            // Two paint opportunities so the decoder has produced a real frame.
-            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            // Let the decoder paint one frame. requestAnimationFrame never fires
+            // in a hidden or occluded page (background tab, minimised window), so
+            // a bare double-rAF hung the whole capture there; the timer is the
+            // fallback that keeps the flow moving in exactly that case.
+            await new Promise((resolve) => {
+              let done = false;
+              const finish = () => {
+                if (done === true) return;
+                done = true;
+                resolve();
+              };
+              requestAnimationFrame(() => requestAnimationFrame(finish));
+              setTimeout(finish, 400);
+            });
             const frame = document.createElement('canvas');
             frame.width = video.videoWidth;
             frame.height = video.videoHeight;
@@ -1112,14 +1139,12 @@ window.__ModuleLoader__.load({
      * UI
      * ------------------------------------------------------------------ */
 
-    function ShotIcon(props) {
-      const spinning = props !== undefined && props.spin === true;
+    function ShotIcon() {
       return react.createElement('svg', {
         viewBox: '0 0 16 16',
         width: 14,
         height: 14,
         'aria-hidden': true,
-        className: spinning === true ? 'dsh-screenshot-spin' : undefined,
         style: { display: 'block' },
       }, [
         react.createElement('path', {
@@ -1178,7 +1203,7 @@ window.__ModuleLoader__.load({
         'aria-label': '截图',
         onMouseDown: (mouseEvent) => mouseEvent.preventDefault(),
         onClick: onClick,
-      }, react.createElement(ShotIcon, { spin: busy === true }));
+      }, react.createElement(ShotIcon));
     }
 
     /* ------------------------------------------------------------------ *

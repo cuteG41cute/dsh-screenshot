@@ -8,6 +8,7 @@ _backup/
 *.log
 .tmp/
 tmp/
+.local-shots/
 
 # OS / editor
 .DS_Store

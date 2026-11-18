@@ -202,7 +202,9 @@ check('the registered component renders a button element', () => {
   assert(tree.props['data-dsh-screenshot'] === 'button', 'missing data-dsh-screenshot marker')
   assert(typeof tree.props.onClick === 'function', 'button has no onClick handler')
   assert(tree.props.title && tree.props.title.length > 0, 'button has no tooltip')
-  return 'icon children=' + tree.children.length
+  const icon = tree.children[0].type()
+  assert(icon.props.className === undefined, 'icon must not carry an animation class: ' + icon.props.className)
+  return 'icon children=' + tree.children.length + ' (no animation)'
 })
 
 check('styles and the console probe are installed', () => {
