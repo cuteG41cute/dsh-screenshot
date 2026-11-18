@@ -1,0 +1,3 @@
+# Lock shell scripts to LF so a Windows checkout can never commit CRLF into
+# install.sh / uninstall.sh (a CRLF shebang breaks them on Linux).
+*.sh   text eol=lf
